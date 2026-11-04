@@ -462,3 +462,100 @@ def preprocess_material(
 
     print(f"\nFinished material {material}")
     return train, val, test, stats
+
+# ============================================================
+# Variable-length groups (A_1 ... A_7 have different lengths)
+# ============================================================
+
+def load_material_groups(raw_root: str | Path, material: str) -> List[SequenceDataset]:
+    """Like load_material, but keeps each measurement group separate."""
+    material_dir = _material_dir(Path(raw_root), material)
+    numbers = find_sequence_numbers(material_dir, material)
+    if not numbers:
+        raise RuntimeError(f"No sequences found for material {material} in {material_dir}")
+
+    groups = []
+    print(f"Loading material {material} ({len(numbers)} groups)")
+    for n in numbers:
+        B, H, T = load_sequence(material_dir, material, n)
+        groups.append(SequenceDataset(B=B, T=T, H=H))
+        print(f"  {material}_{n}: B={B.shape}")
+    return groups
+
+
+def _concat(parts: List[SequenceDataset]) -> SequenceDataset:
+    return SequenceDataset(
+        B=np.concatenate([p.B for p in parts]),
+        T=np.concatenate([p.T for p in parts]),
+        H=np.concatenate([p.H for p in parts]),
+    )
+
+
+def preprocess_material_groups(
+    raw_root, processed_root, material, config: Optional[PreprocessConfig] = None
+):
+    """raw CSV groups -> pooled split (stratified by T) -> normalize ->
+    window each group -> concatenate -> save. Same outputs as preprocess_material."""
+    config = config or PreprocessConfig()
+    config.validate()
+    if not config.use_windows:
+        raise ValueError("Variable-length groups require use_windows=True")
+
+    groups = load_material_groups(raw_root, material)
+    sizes = [len(g) for g in groups]
+    offsets = np.cumsum([0] + sizes)
+    T_all = np.concatenate([g.T for g in groups])
+
+    # Split the POOLED sequences (all groups together), stratified by temperature.
+    # A dummy dataset carries the pooled index through split_dataset.
+    pool = SequenceDataset(
+        B=np.arange(len(T_all), dtype=np.float32)[:, None],
+        T=T_all,
+        H=np.zeros((len(T_all), 1), dtype=np.float32),
+    )
+    tr, va, te = split_dataset(pool, config)
+
+    def take(split: SequenceDataset) -> List[SequenceDataset]:
+        idx = split.B[:, 0].astype(int)
+        parts = []
+        for i, g in enumerate(groups):
+            sel = idx[(idx >= offsets[i]) & (idx < offsets[i + 1])] - offsets[i]
+            if len(sel):
+                parts.append(g.subset(sel))
+        return parts
+
+    train_p, val_p, test_p = take(tr), take(va), take(te)
+    print(f"\nSequences  train={len(tr)}  val={len(va)}  test={len(te)}")
+
+    # Normalization from TRAIN only, across all groups
+    train_all_raw = _concat(train_p)
+    stats = compute_normalization(train_all_raw)
+    print(f"B_max={stats.B_max}  T_max={stats.T_max}  H_max={stats.H_max}")
+
+    def finish(parts):
+        wins = [create_windows(normalize_dataset(p, stats),
+                               config.window_size, config.stride)
+                for p in parts if p.B.shape[1] >= config.window_size]
+        return _concat(wins)
+
+    train, val, test = finish(train_p), finish(val_p), finish(test_p)
+
+    material_root = Path(processed_root) / material
+    material_root.mkdir(parents=True, exist_ok=True)
+    save_dataset(train, material_root / "train.npz")
+    save_dataset(val, material_root / "val.npz")
+    save_dataset(test, material_root / "test.npz")
+    stats.save(material_root / "normalization.json")
+
+    with open(material_root / "metadata.json", "w") as f:
+        json.dump({
+            "material": material, "input_features": ["B", "T"], "target": "H",
+            "group_lengths": [int(g.B.shape[1]) for g in groups],
+            "window_size": config.window_size, "stride": config.stride,
+            "train_ratio": config.train_ratio, "val_ratio": config.val_ratio,
+            "test_ratio": config.test_ratio, "seed": config.seed,
+            "B_max": stats.B_max, "T_max": stats.T_max, "H_max": stats.H_max,
+        }, f, indent=4)
+
+    print(f"Finished material {material}")
+    return train, val, test, stats
