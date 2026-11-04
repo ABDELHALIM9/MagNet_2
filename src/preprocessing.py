@@ -528,8 +528,12 @@ def preprocess_material_groups(
     print(f"\nSequences  train={len(tr)}  val={len(va)}  test={len(te)}")
 
     # Normalization from TRAIN only, across all groups
-    train_all_raw = _concat(train_p)
-    stats = compute_normalization(train_all_raw)
+    stats_parts = [compute_normalization(p) for p in train_p]
+    stats = NormalizationStats(
+        B_max=max(s.B_max for s in stats_parts),
+        T_max=max(s.T_max for s in stats_parts),
+        H_max=max(s.H_max for s in stats_parts),
+    )
     print(f"B_max={stats.B_max}  T_max={stats.T_max}  H_max={stats.H_max}")
 
     def finish(parts):
