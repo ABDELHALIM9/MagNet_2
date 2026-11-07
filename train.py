@@ -8,11 +8,24 @@ Example:
 
 Defaults can also come from a YAML file:  --config configs/default.yaml
 (command-line flags override the file).
+
+Outputs in --out-dir:
+    train.log          timestamped log (appended across runs)
+    args.json          arguments of the run
+    metrics.csv        per-epoch metrics (appended across runs)
+    history.json       per-epoch metrics (rewritten every epoch)
+    best.pt            best checkpoint (used by inference.py)
+    last.pt            latest checkpoint with optimizer/scheduler state
+    test_metrics.json  final test metrics of the best checkpoint
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import logging
+import platform
+import sys
 import time
 from pathlib import Path
 
@@ -29,6 +42,19 @@ from src.metrics import (
     summarize,
 )
 from src.model import BTHGRU, count_parameters
+
+
+def setup_logging(out_dir: Path) -> logging.Logger:
+    log = logging.getLogger("train")
+    log.setLevel(logging.INFO)
+    log.handlers.clear()
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s",
+                            "%Y-%m-%d %H:%M:%S")
+    for h in (logging.StreamHandler(sys.stdout),
+              logging.FileHandler(out_dir / "train.log", mode="a")):
+        h.setFormatter(fmt)
+        log.addHandler(h)
+    return log
 
 
 def parse_args():
@@ -92,10 +118,19 @@ def main():
     np.random.seed(args.seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Device: {device}")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    log = setup_logging(out_dir)
+    log.info("=" * 60)
+    log.info(f"New run | material={args.material}")
+    log.info(f"Python {platform.python_version()} | torch {torch.__version__}")
+    log.info(f"Device: {device}"
+             + (f" ({torch.cuda.get_device_name(0)})" if device == "cuda" else ""))
+    with open(out_dir / "args.json", "w") as f:
+        json.dump(vars(args), f, indent=2)
+    log.info(f"Args: {json.dumps(vars(args))}")
 
     train_loader, val_loader, test_loader, stats = make_loaders(
         args.processed_root,
@@ -104,6 +139,10 @@ def main():
         num_workers=args.num_workers,
         pin_memory=(device == "cuda"),
     )
+    log.info(f"Windows | train={len(train_loader.dataset)} "
+             f"val={len(val_loader.dataset)} test={len(test_loader.dataset)}")
+    log.info(f"Normalization | B_max={stats.B_max:.4g} "
+             f"T_max={stats.T_max:.4g} H_max={stats.H_max:.4g}")
 
     model = BTHGRU(
         hidden_size=args.hidden_size,
@@ -111,7 +150,7 @@ def main():
         dropout=args.dropout,
         bidirectional=args.bidirectional,
     ).to(device)
-    print(f"Parameters: {count_parameters(model)}")
+    log.info(f"Parameters: {count_parameters(model)}")
 
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
@@ -123,6 +162,7 @@ def main():
 
     best_val, best_epoch, history = float("inf"), -1, []
     ckpt_path = out_dir / "best.pt"
+    csv_path = out_dir / "metrics.csv"
 
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
@@ -149,13 +189,30 @@ def main():
             "train_mse": train_loss,
             "val_mse": val["mse"],
             "val_sre_mean": val["sre"]["mean"],
+            "val_nrmse_mean": val["nrmse"]["mean"],
             "lr": optimizer.param_groups[0]["lr"],
         })
-        print(
+        log.info(
             f"Epoch {epoch:03d} | train {train_loss:.3e} | val {val['mse']:.3e} "
-            f"| val SRE {val['sre']['mean']:.4f} | {time.time() - t0:.1f}s"
+            f"| val SRE {val['sre']['mean']:.4f} "
+            f"| val NRMSE {val['nrmse']['mean']:.4f} "
+            f"| lr {optimizer.param_groups[0]['lr']:.2e} "
+            f"| {time.time() - t0:.1f}s"
         )
 
+        # CSV (header written once)
+        write_header = not csv_path.exists()
+        with open(csv_path, "a", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=history[-1].keys())
+            if write_header:
+                w.writeheader()
+            w.writerow(history[-1])
+
+        # history rewritten every epoch, so a crash doesn't lose it
+        with open(out_dir / "history.json", "w") as f:
+            json.dump(history, f, indent=2)
+
+        # best checkpoint
         if val["mse"] < best_val:
             best_val, best_epoch = val["mse"], epoch
             torch.save({
@@ -167,9 +224,18 @@ def main():
                 "material": args.material,
                 "epoch": epoch,
             }, ckpt_path)
+            log.info(f"  -> new best val MSE {best_val:.3e}, saved {ckpt_path}")
+
+        # latest checkpoint (saved after the best update so values are current)
+        torch.save({
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict(),
+            "epoch": epoch, "best_val": best_val, "best_epoch": best_epoch,
+        }, out_dir / "last.pt")
 
         if args.patience and epoch - best_epoch >= args.patience:
-            print(f"Early stopping at epoch {epoch} (best epoch {best_epoch}).")
+            log.info(f"Early stopping at epoch {epoch} (best epoch {best_epoch}).")
             break
 
     # ---- final test evaluation with the best checkpoint ----
@@ -177,13 +243,12 @@ def main():
     model.load_state_dict(ckpt["model_state"])
     test = evaluate(model, test_loader, device)
 
-    print("\nTest metrics (best checkpoint):")
-    print(json.dumps(test, indent=2))
+    log.info(f"Test metrics (best checkpoint, epoch {best_epoch}):\n"
+             f"{json.dumps(test, indent=2)}")
 
-    with open(out_dir / "history.json", "w") as f:
-        json.dump(history, f, indent=2)
     with open(out_dir / "test_metrics.json", "w") as f:
         json.dump({"best_epoch": best_epoch, **test}, f, indent=2)
+    log.info("Done.")
 
 
 if __name__ == "__main__":
