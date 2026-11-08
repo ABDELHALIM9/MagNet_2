@@ -1,7 +1,7 @@
 # Defaults for train.py  (CLI flags override these)
 material: A
-processed-root: /content/drive/MyDrive/BTH_MAG/processed
-out-dir: /content/drive/MyDrive/BTH_MAG/models/A
+processed-root: /content/drive/MyDrive/NewMagNet2/DataSet/processed
+out-dir: /content/drive/MyDrive/NewMagNet2/models/A
 
 hidden-size: 32
 num-layers: 1
