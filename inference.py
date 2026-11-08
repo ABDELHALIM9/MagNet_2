@@ -1,5 +1,6 @@
 """
 Predict H from raw (physical-unit) B and T using a trained checkpoint.
+Works with both model types (gru, mss_gru).
 
 Python API:
     from inference import load_model, predict_H
@@ -18,8 +19,9 @@ import argparse
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 
-from src.model import BTHGRU
+from src.model import build_model_from_config
 from src.preprocessing import NormalizationStats
 
 
@@ -27,7 +29,7 @@ def load_model(ckpt_path: str, device: str | None = None):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(ckpt_path, map_location=device)
 
-    model = BTHGRU(**ckpt["model_config"]).to(device)
+    model = build_model_from_config(ckpt["model_config"]).to(device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 
@@ -37,7 +39,7 @@ def load_model(ckpt_path: str, device: str | None = None):
 
 
 @torch.no_grad()
-def predict_H(model: BTHGRU, stats: NormalizationStats, B, T, batch_size: int = 256):
+def predict_H(model: nn.Module, stats: NormalizationStats, B, T, batch_size: int = 256):
     """Raw B [N, L] (or [L]) and T [N] (or scalar) -> raw H with the same shape as B."""
     device = next(model.parameters()).device
 

@@ -41,7 +41,7 @@ from src.metrics import (
     sequence_relative_error,
     summarize,
 )
-from src.model import BTHGRU, count_parameters
+from src.model import build_model, count_parameters
 
 
 def setup_logging(out_dir: Path) -> logging.Logger:
@@ -68,6 +68,12 @@ def parse_args():
     p.add_argument("--num-layers", type=int, default=1)
     p.add_argument("--dropout", type=float, default=0.0)
     p.add_argument("--bidirectional", action="store_true")
+    p.add_argument("--model", type=str, default="gru", choices=["gru", "mss_gru"],
+                   help="gru = baseline BTHGRU, mss_gru = Magnetic State-Space GRU")
+    # MSS-GRU only (ignored by --model gru)
+    p.add_argument("--enc-dim", type=int, default=32)
+    p.add_argument("--dec-dim", type=int, default=64)
+    p.add_argument("--db-scale", type=float, default=100.0)
 
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--batch-size", type=int, default=128)
@@ -144,12 +150,17 @@ def main():
     log.info(f"Normalization | B_max={stats.B_max:.4g} "
              f"T_max={stats.T_max:.4g} H_max={stats.H_max:.4g}")
 
-    model = BTHGRU(
+    model_kwargs = dict(
         hidden_size=args.hidden_size,
         num_layers=args.num_layers,
         dropout=args.dropout,
         bidirectional=args.bidirectional,
-    ).to(device)
+    )
+    if args.model == "mss_gru":
+        model_kwargs.update(enc_dim=args.enc_dim, dec_dim=args.dec_dim,
+                            db_scale=args.db_scale)
+    model = build_model(args.model, **model_kwargs).to(device)
+    log.info(f"Model: {args.model} | config: {model.config}")
     log.info(f"Parameters: {count_parameters(model)}")
 
     optimizer = torch.optim.AdamW(
