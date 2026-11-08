@@ -41,7 +41,7 @@ from src.metrics import (
     sequence_relative_error,
     summarize,
 )
-from src.model import build_model, count_parameters
+from src.models import MODEL_TYPES, build_model_from_args, count_parameters
 
 
 def setup_logging(out_dir: Path) -> logging.Logger:
@@ -68,12 +68,19 @@ def parse_args():
     p.add_argument("--num-layers", type=int, default=1)
     p.add_argument("--dropout", type=float, default=0.0)
     p.add_argument("--bidirectional", action="store_true")
-    p.add_argument("--model", type=str, default="gru", choices=["gru", "mss_gru"],
-                   help="gru = baseline BTHGRU, mss_gru = Magnetic State-Space GRU")
-    # MSS-GRU only (ignored by --model gru)
+    p.add_argument("--model", type=str, default="gru", choices=list(MODEL_TYPES),
+                   help="gru | mss_gru | transformer")
+    # MSS-GRU only
     p.add_argument("--enc-dim", type=int, default=32)
     p.add_argument("--dec-dim", type=int, default=64)
+    # MSS-GRU and Transformer (dB input scaling)
     p.add_argument("--db-scale", type=float, default=100.0)
+    # Transformer only (uses --num-layers and --dropout too)
+    p.add_argument("--d-model", type=int, default=64)
+    p.add_argument("--n-heads", type=int, default=4)
+    p.add_argument("--ff-dim", type=int, default=128)
+    p.add_argument("--non-causal", action="store_true",
+                   help="transformer sees the whole window (offline only)")
 
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--batch-size", type=int, default=128)
@@ -150,16 +157,7 @@ def main():
     log.info(f"Normalization | B_max={stats.B_max:.4g} "
              f"T_max={stats.T_max:.4g} H_max={stats.H_max:.4g}")
 
-    model_kwargs = dict(
-        hidden_size=args.hidden_size,
-        num_layers=args.num_layers,
-        dropout=args.dropout,
-        bidirectional=args.bidirectional,
-    )
-    if args.model == "mss_gru":
-        model_kwargs.update(enc_dim=args.enc_dim, dec_dim=args.dec_dim,
-                            db_scale=args.db_scale)
-    model = build_model(args.model, **model_kwargs).to(device)
+    model = build_model_from_args(args).to(device)
     log.info(f"Model: {args.model} | config: {model.config}")
     log.info(f"Parameters: {count_parameters(model)}")
 

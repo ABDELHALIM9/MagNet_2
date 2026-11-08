@@ -21,7 +21,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
-from src.model import build_model_from_config
+from src.models import build_model_from_config
 from src.preprocessing import NormalizationStats
 
 
